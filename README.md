@@ -7,7 +7,7 @@ Fixes cheap CSR8510 A10 Bluetooth 4.0 USB dongles (USB ID `10d7:b012`) that work
 ## Quick Install
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/CSR8510-A10-bluetooth_adapter_fix-Linux.git
+git clone https://github.com/ShadowWalkerM/CSR8510-A10-bluetooth_adapter_fix-Linux.git
 cd CSR8510-A10-bluetooth_adapter_fix-Linux
 sudo bash install.sh
 ```
