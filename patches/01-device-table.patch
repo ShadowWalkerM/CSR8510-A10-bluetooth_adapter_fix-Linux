@@ -1,0 +1,10 @@
+--- a/drivers/bluetooth/btusb.c
++++ b/drivers/bluetooth/btusb.c
+@@ ... @@ static const struct usb_device_id btusb_table[] = {
+ 	/* Fake CSR clone - CSR8510 A10 */
+-	{ USB_DEVICE(0x10d7, 0xb012), .driver_info = BTUSB_ACTIONS_SEMI },
++	{ USB_DEVICE(0x10d7, 0xb012), .driver_info = BTUSB_CSR }, /* Fake CSR clone - CSR8510 A10 */
+
+The kernel already has 10d7:b012 in the device table but marks it as
+BTUSB_ACTIONS_SEMI (Actions Semiconductor). This is wrong for the
+CSR8510 A10 clone — it needs BTUSB_CSR so firmware upload happens.
