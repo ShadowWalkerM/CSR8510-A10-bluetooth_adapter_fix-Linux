@@ -1,0 +1,13 @@
+[Trigger]
+Type = Package
+Operation = Install
+Operation = Upgrade
+Target = linux-cachyos
+Target = linux-cachyos-headers
+
+[Action]
+Description = Patching btusb module for CSR8510 A10 (10d7:b012) clone support
+When = PostTransaction
+Exec = /usr/local/bin/patch-btusb-csr8510.sh
+Depends = clang
+Depends = zstd
