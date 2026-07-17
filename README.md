@@ -4,7 +4,6 @@ A script to fix issues with the CSR8510-A10 Bluetooth USB adapter on Linux.
 
 **Confirmed working on:**
 * **CachyOS**
-* **Arch Linux** (and most likely other Arch-based distributions)
 
 ---
 
