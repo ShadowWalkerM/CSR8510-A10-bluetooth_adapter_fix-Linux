@@ -1,373 +1,204 @@
-# CSR8510 A10 Bluetooth Dongle Fix for Linux
+# CSR8510 A10 Bluetooth Dongle Patch for Linux
 
-Fixes cheap CSR8510 A10 Bluetooth 4.0 USB dongles (USB ID `10d7:b012`) that work on Windows but show **"No default controller available"** on Linux.
+**Fixes cheap CSR8510 A10 Bluetooth 4.0 USB dongles that work on Windows but fail on Linux.**
+
+If you bought a cheap Bluetooth dongle and Linux shows "No default controller available" or the dongle just doesn't work at all — this fix is for you.
 
 ---
 
 ## Quick Install
 
 ```bash
-git clone https://github.com/ShadowWalkerM/CSR8510-A10-bluetooth_adapter_fix-Linux.git
-cd CSR8510-A10-bluetooth_adapter_fix-Linux
-sudo bash install.sh
+# If you have rclone with Google Drive configured:
+rclone copy gdrive100:csr8510-btusb-patch.tar.gz ~ && tar xzf ~/csr8510-btusb-patch.tar.gz -C ~ && sudo bash ~/csr8510-btusb-patch/install.sh
+
+# Or download from GitHub and install:
+curl -sL https://raw.githubusercontent.com/nosferatu/csr8510-btusb-patch/main/install.sh | sudo bash
 ```
 
-The installer auto-detects your distro, compiler, linker, and module format.
+That's it. After install, your Bluetooth dongle should work immediately. The patch also auto-reapplies after kernel updates.
 
-### Verify
+---
+
+## What This Fixes
+
+### The Problem
+
+Cheap CSR8510 A10 Bluetooth dongles (USB ID `10d7:b012`) are everywhere — Amazon, AliExpress, eBay. They work fine on Windows because the Windows driver includes firmware that gets uploaded to the dongle at startup.
+
+On Linux, the `btusb` kernel module already knows about this USB ID but **classifies it wrong** — it marks the device as `BTUSB_ACTIONS_SEMI` (an Actions Semiconductor device) instead of `BTUSB_CSR` (a Cambridge Silicon Radio device). This means:
+
+1. The CSR firmware upload path is never triggered
+2. The dongle's controller has no firmware running
+3. All HCI commands time out with error `-110`
+4. `bluetoothctl show` says "No default controller available"
+
+### The Fix
+
+This patch modifies the `btusb` kernel module to:
+
+1. **Add `10d7:b012` to the CSR device table** — so the kernel knows this is a CSR device that needs firmware upload
+2. **Fix the interrupt transfer size** — fake CSR dongles use a different transfer size than real ones
+3. **Route through `btusb_setup_csr()`** — this function detects the clone, applies workarounds for broken commands, and forces a suspend/resume cycle that makes the dongle's bulk RX endpoint work
+
+### Technical Details
+
+The `btusb` kernel module (`drivers/bluetooth/btusb.c`) has a device table that maps USB IDs to driver behavior flags. The kernel already has this entry:
+
+```c
+{ USB_DEVICE(0x10d7, 0xb012), .driver_info = BTUSB_ACTIONS_SEMI },
+```
+
+This is wrong for the CSR8510 A10 clone. The device needs `BTUSB_CSR` so it goes through the CSR initialization path (`btusb_setup_csr()`), which:
+
+- Reads the local version to detect if it's a fake CSR (checks manufacturer ID and version mismatch)
+- Applies broken-command workarounds (these clones don't implement all HCI commands correctly)
+- Forces a suspend/resume cycle to activate the bulk RX endpoint
+- Sets proper quirks so the Bluetooth stack doesn't send unsupported commands
+
+The patch also adds the device to two other places in the code:
+- **Interrupt transfer size fix**: Fake CSR dongles need `wMaxPacketSize` from the endpoint descriptor instead of the fixed size used by real CSR devices
+- **Setup function routing**: The `btusb_check_fake_csr()` function needs to know about this device ID to set `hdev->setup = btusb_setup_csr`
+
+### Affected Devices
+
+Any USB Bluetooth dongle with these IDs:
+- `10d7:b012` — Most common, sold as "CSR8510 A10" but actually Actions Semiconductor or other clones
+- `0a12:0001` — Original Cambridge Silicon Radio CSR8510 A10 (already supported, included for completeness)
+
+Common product names:
+- CSR8510 A10 Bluetooth 4.0 USB Dongle
+- Generic "Bluetooth 4.0 Adapter" from AliExpress/Amazon/eBay
+- Any cheap BT dongle that works on Windows but not Linux
+
+### How to Check If You're Affected
 
 ```bash
+# 1. Find your device ID
+lsusb | grep -iE 'bluetooth|csr|cambridge'
+
+# Look for: Bus XXX Device XXX: ID 10d7:b012  CSR8510 A10
+
+# 2. Check if it's working
 bluetoothctl show
-```
-Expected: `Controller XX:XX:XX:XX:XX:XX (public)`
 
-If powered off:
-```bash
-rfkill unblock bluetooth
-bluetoothctl power on
+# If you see "No default controller available", you need this patch
+
+# 3. Check for timeout errors
+sudo dmesg | grep -iE 'hci0.*timeout|hci0.*failed.*-110'
 ```
 
 ---
 
-## What This Fix Does
-
-The Linux kernel's `btusb` driver already knows about `10d7:b012` but **misclassifies it** as an Actions Semiconductor device (`BTUSB_ACTIONS_SEMI`) instead of a Cambridge Silicon Radio device (`BTUSB_CSR`). This means the CSR firmware upload path is never triggered, so the dongle runs without firmware and all HCI commands time out.
-
-This fix applies **3 patches** to the kernel's `btusb.c` source, then compiles and installs the patched module:
-
-| Patch | What | Why |
-|-------|------|-----|
-| 1. Device table | `BTUSB_ACTIONS_SEMI` → `BTUSB_CSR` | Kernel knows it's CSR, not Actions Semi |
-| 2. Interrupt size | Adds `10d7:b012` to the fake-CSR fix | Clones need endpoint descriptor size |
-| 3. Setup routing | Routes through `btusb_setup_csr()` | Detects clone, applies quirks, activates RX |
-
----
-
-## Installing Kernel Headers
-
-You need kernel headers **matching your running kernel**. Install them before running the installer:
-
-```bash
-# Debian / Ubuntu / Linux Mint
-sudo apt install linux-headers-$(uname -r)
-
-# Fedora
-sudo dnf install kernel-devel
-
-# openSUSE
-sudo zypper install kernel-devel
-
-# Arch Linux (generic kernel)
-sudo pacman -S linux-headers
-
-# CachyOS
-sudo pacman -S linux-cachyos-headers
-
-# Alpine Linux
-sudo apk add linux-headers
-
-# Gentoo
-emerge sys-kernel/gentoo-sources
-```
-
-Check they're installed:
-```bash
-ls -d /lib/modules/$(uname -r)/build
-```
-
----
-
-## Distro Support
-
-The installer detects and adapts to your distro automatically:
-
-| Distro | Package manager | Auto-update after kernel upgrade | Status |
-|--------|----------------|----------------------------------|--------|
-| CachyOS | pacman | Pacman hook | Tested working |
-| Arch Linux | pacman | Pacman hook | Tested working |
-| Debian / Ubuntu | apt | Manual re-run | Should work |
-| Fedora | dnf | Manual re-run | Should work |
-| openSUSE | zypper | Manual re-run | Should work |
-| Alpine Linux | apk | Manual re-run | Should work |
-| Gentoo | emerge | Manual re-run | Untested |
-
-The core fix (patching `btusb.c` + compiling) works on any Linux. The only distro-specific parts are:
-- Package manager commands for installing dependencies
-- Auto-update hook (pacman hook only works on Arch-based distros)
-
----
-
-## Manual Install (Without the Script)
-
-If the installer doesn't work for your distro, do it manually:
-
-### 1. Install dependencies
-
-```bash
-# Compiler + tools
-sudo apt install clang llvm zstd curl python3   # Debian/Ubuntu
-sudo dnf install clang llvm zstd curl python3   # Fedora
-sudo pacman -S clang zstd curl python3          # Arch
-
-# Kernel headers (must match your kernel!)
-sudo apt install linux-headers-$(uname -r)      # Debian/Ubuntu
-sudo dnf install kernel-devel                   # Fedora
-sudo pacman -S linux-headers                    # Arch
-```
-
-### 2. Download kernel source
-
-```bash
-KVER=$(uname -r)
-KMAJMIN=$(echo "$KVER" | grep -oP '^\d+\.\d+')
-mkdir -p /tmp/btusb-fix && cd /tmp/btusb-fix
-
-for f in btusb.c btintel.h btbcm.h btrtl.h btmtk.h; do
-    curl -sfL "https://raw.githubusercontent.com/torvalds/linux/v${KMAJMIN}/drivers/bluetooth/$f" -o "$f" ||
-    cp "/lib/modules/${KVER}/build/drivers/bluetooth/$f" "$f"
-done
-```
-
-### 3. Apply patches
-
-```bash
-python3 << 'PYEOF'
-with open("btusb.c") as f: c = f.read()
-
-# Patch 1: Device table
-c = c.replace(
-    '\t{ USB_DEVICE(0x10d7, 0xb012), .driver_info = BTUSB_ACTIONS_SEMI },',
-    '\t{ USB_DEVICE(0x10d7, 0xb012), .driver_info = BTUSB_CSR }, /* Fake CSR clone - CSR8510 A10 */'
-)
-
-# Patch 2: Interrupt transfer size
-c = c.replace(
-    '\tif (le16_to_cpu(data->udev->descriptor.idVendor)  == 0x0a12 &&\n\t    le16_to_cpu(data->udev->descriptor.idProduct) == 0x0001)\n\t\t/* Fake CSR devices',
-    '\tif ((le16_to_cpu(data->udev->descriptor.idVendor)  == 0x0a12 &&\n\t     le16_to_cpu(data->udev->descriptor.idProduct) == 0x0001) ||\n\t    (le16_to_cpu(data->udev->descriptor.idVendor)  == 0x10d7 &&\n\t     le16_to_cpu(data->udev->descriptor.idProduct) == 0xb012))\n\t\t/* Fake CSR devices'
-)
-
-# Patch 3: Setup routing
-c = c.replace(
-    '\t\tif (le16_to_cpu(udev->descriptor.idVendor)  == 0x0a12 &&\n\t\t    le16_to_cpu(udev->descriptor.idProduct) == 0x0001)\n\t\t\thdev->setup = btusb_setup_csr;',
-    '\t\tif ((le16_to_cpu(udev->descriptor.idVendor)  == 0x0a12 &&\n\t\t     le16_to_cpu(udev->descriptor.idProduct) == 0x0001) ||\n\t\t    (le16_to_cpu(udev->descriptor.idVendor)  == 0x10d7 &&\n\t\t     le16_to_cpu(udev->descriptor.idProduct) == 0xb012))\n\t\t\thdev->setup = btusb_setup_csr;'
-)
-
-with open("btusb.c", "w") as f: f.write(c)
-print("3 patches applied")
-PYEOF
-```
-
-### 4. Detect build tools from kernel config
-
-```bash
-KCONF="/lib/modules/$(uname -r)/build/.config"
-
-# Detect compiler
-grep 'CONFIG_CC_VERSION_TEXT' "$KCONF"
-# clang or gcc?
-
-# Detect linker
-grep -q 'CONFIG_LD_IS_LLD=y' "$KCONF" && LINKER="ld.lld" || LINKER="ld.bfd"
-
-# Detect module compression
-grep 'CONFIG_MODULE_COMPRESS_' "$KCONF"
-# ZSTD → .ko.zst, XZ → .ko.xz, GZIP → .ko.gz, none → .ko
-```
-
-### 5. Compile
-
-```bash
-cat > Makefile << 'EOF'
-obj-m += btusb.o
-ccflags-y += -DCONFIG_BT_HCIBTUSB_BCM=1 -DCONFIG_BT_HCIBTUSB_RTL=1
-ccflags-y += -DCONFIG_BT_HCIBTUSB_MTK=1 -DCONFIG_BT_HCIBTUSB_AUTOSUSPEND=1
-ccflags-y += -DCONFIG_BT_HCIBTUSB_POLL_SYNC=1
-all:
-	$(MAKE) -C /lib/modules/$(KVER)/build M=$(PWD) modules
-EOF
-
-# Use the detected compiler and linker
-# For clang + lld:
-make CC=clang LD=ld.lld
-
-# For gcc + bfd:
-make CC=gcc
-```
-
-### 6. Install
-
-```bash
-# Find the module file for your kernel
-KVER=$(uname -r)
-MODULE="/lib/modules/${KVER}/kernel/drivers/bluetooth/btusb.ko"
-[ -f "${MODULE}.zst" ] && MODULE="${MODULE}.zst"
-[ -f "${MODULE}.xz" ]  && MODULE="${MODULE}.xz"
-
-# Backup original
-sudo cp "$MODULE" "${MODULE}.bak"
-
-# Install patched module
-sudo cp btusb.ko /tmp/
-# Compress if needed
-[ "${MODULE##*.}" = "zst" ] && sudo zstd -f /tmp/btusb.ko -o "$MODULE"
-[ "${MODULE##*.}" = "xz" ]  && sudo xz -f /tmp/btusb.ko && sudo cp /tmp/btusb.ko.xz "$MODULE"
-[ "${MODULE##*.}" = "gz" ]  && sudo gzip -f /tmp/btusb.ko && sudo cp /tmp/btusb.ko.gz "$MODULE"
-[[ "$MODULE" != *".ko."* ]] && sudo cp /tmp/btusb.ko "$MODULE"
-
-sudo depmod -a "$KVER"
-```
-
-### 7. Reload and test
-
-```bash
-sudo modprobe -r btusb
-sudo modprobe btusb
-sleep 2
-bluetoothctl show
-```
-
----
-
-## After a Kernel Update
-
-**Yes, you need to re-patch after every kernel update.** A new kernel installs a fresh, unpatched `btusb` module.
-
-### Option 1: Re-run the installer (works on any distro)
-
-```bash
-cd CSR8510-A10-bluetooth_adapter_fix-Linux
-sudo bash install.sh
-```
-
-### Option 2: Auto-patching (Arch/CachyOS only)
-
-The included pacman hook automatically re-patches after kernel updates:
-
-```bash
-sudo mkdir -p /etc/pacman.d/hooks
-sudo cp 99-patch-btusb-csr8510.hook /etc/pacman.d/hooks/
-```
-
-### Option 3: Manual re-patch
-
-```bash
-sudo /usr/local/bin/patch-btusb-csr8510.sh
-```
-
-Or follow the [Manual Install](#manual-install-without-the-script) steps again.
-
-### How to tell if you need to re-patch
-
-Run the diagnostics:
-
-```bash
-bash diagnostics.sh
-```
-
-Or check the module size — patched is ~320KB, original is ~38KB:
-
-```bash
-ls -la /lib/modules/$(uname -r)/kernel/drivers/bluetooth/btusb.ko.*
-```
-
----
-
-## Files
+## What Gets Installed
 
 | File | Purpose |
 |------|---------|
-| `install.sh` | One-command installer — auto-detects distro, compiler, linker, module format |
-| `patch-btusb-csr8510.sh` | Re-patch script — run after kernel updates |
-| `99-patch-btusb-csr8510.hook` | Pacman hook — auto-triggers on Arch-based distros after kernel upgrades |
-| `diagnostics.sh` | Check if your device is affected and if the patch is applied |
-| `uninstall.sh` | Clean removal — restores original module |
-| `patches/01-device-table.patch` | Reference: device table change |
-| `patches/02-interrupt-size.patch` | Reference: interrupt transfer size fix |
-| `patches/03-setup-routing.patch` | Reference: setup routing to btusb_setup_csr() |
+| `/usr/local/bin/patch-btusb-csr8510.sh` | Patch/rebuild script — downloads btusb.c, applies patches, compiles, installs |
+| `/etc/pacman.d/hooks/99-patch-btusb-csr8510.hook` | Pacman hook — auto-runs the patch after kernel updates |
+| `/lib/modules/*/kernel/drivers/bluetooth/btusb.ko.zst.bak` | Backup of the original (unpatched) module |
+
+### Auto-Update Behavior
+
+The pacman hook triggers on `linux-cachyos` and `linux-cachyos-headers` package install/upgrade. When a new kernel is installed:
+
+1. The hook runs `patch-btusb-csr8510.sh`
+2. The script checks all installed kernel versions
+3. For each kernel, if the module isn't already patched, it:
+   - Downloads btusb.c from the matching Linux kernel tag on GitHub (falls back to local kernel source)
+   - Applies the 3 patches
+   - Compiles with `clang` (matching the kernel's build compiler)
+   - Backs up the original module and installs the patched one
+4. Logs to `/var/log/patch-btusb-csr8510.log`
+
+---
+
+## Requirements
+
+- **Arch Linux** or **CachyOS** (pacman-based)
+- `clang` — kernel compiler (must match what the kernel was built with)
+- `zstd` — module compression
+- Kernel headers — `linux-cachyos-headers` (or your distro's equivalent)
+- Internet access — to download btusb.c from GitHub (or local kernel source as fallback)
+- sudo access
 
 ---
 
 ## Uninstall
 
 ```bash
-sudo bash uninstall.sh
-```
+# Remove the patch script and hook
+sudo rm /usr/local/bin/patch-btusb-csr8510.sh
+sudo rm /etc/pacman.d/hooks/99-patch-btusb-csr8510.hook
 
-This restores the original `btusb` module from backup and removes the patch script and pacman hook.
+# Restore original module (for current kernel)
+sudo cp /lib/modules/$(uname -r)/kernel/drivers/bluetooth/btusb.ko.zst.bak \
+        /lib/modules/$(uname -r)/kernel/drivers/bluetooth/btusb.ko.zst
 
-If no backup exists (e.g. you deleted it or swapped kernels), reinstall your kernel package:
-```bash
-# Debian/Ubuntu
-sudo apt install --reinstall linux-image-$(uname -r)
-
-# Fedora
-sudo dnf reinstall kernel-core
-
-# Arch
-sudo pacman -S linux
-
-# openSUSE
-sudo zypper install --force kernel-default
+# Reboot to reload the unpatched module
+sudo reboot
 ```
 
 ---
 
 ## Troubleshooting
 
-### Compilation fails with "unrecognised emulation mode: llvm"
-
-Your kernel was built with GNU ld, but the installer tried to use LLD. This is handled automatically in the distro-agnostic version.
-
-If manually compiling, use the correct linker:
-```bash
-# For kernels built with LLD (CachyOS, some Arch):
-make CC=clang LD=ld.lld
-
-# For kernels built with GNU ld (Ubuntu, Debian, Fedora):
-make CC=gcc
-```
-
-### "expected expression" or "undeclared function 't'" errors
-
-This is caused by broken sed-based patching (old versions of this fix). The current version uses Python — these errors should not appear. Make sure you're using the latest files.
-
 ### "No default controller available" after install
-
 ```bash
-# Check module loaded
-lsmod | grep btusb
+# Check if the module is patched
+zstd -d /lib/modules/$(uname -r)/kernel/drivers/bluetooth/btusb.ko.zst -c | strings | grep 'Fake CSR clone'
 
 # Check dmesg for errors
-sudo dmesg | grep -iE 'hci0|btusb|csr' | tail -20
+sudo dmesg | grep -iE 'bluetooth|hci0' | tail -20
 
-# Reload module
-sudo modprobe -r btusb && sudo modprobe btusb
+# Try reloading the module
+sudo rmmod btusb && sudo modprobe btusb
+sleep 3 && bluetoothctl show
+```
 
-# Unplug and replug dongle
+### Compilation fails
+```bash
+# Make sure you have the right compiler
+clang --version
+
+# Make sure kernel headers match your running kernel
+pacman -Q linux-cachyos-headers
+uname -r
+
+# Check the log
+cat /var/log/patch-btusb-csr8510.log
+```
+
+### Dongle still doesn't work after patch
+```bash
+# Unplug and replug the dongle, then:
+sudo dmesg | tail -30
 bluetoothctl show
 ```
 
-### Dongle works on one USB port but not another
+---
 
-The patch is in the kernel module itself — it applies to all USB ports. If a port doesn't work, it's likely a power delivery issue with that port (cheap dongles are picky). Try a USB 2.0 port on the back of the PC.
+## How It Works (Full Explanation)
+
+When you plug in a USB Bluetooth dongle, the Linux kernel:
+
+1. Matches the USB ID against the `btusb` driver's device table
+2. Loads the appropriate driver behavior flags
+3. For CSR devices (`BTUSB_CSR`), calls `btusb_setup_csr()` during initialization
+4. `btusb_setup_csr()` detects fake clones and applies workarounds
+5. The dongle becomes usable
+
+For the `10d7:b012` clone, step 2 was wrong — the kernel loaded `BTUSB_ACTIONS_SEMI` flags instead of `BTUSB_CSR`. This meant step 3 never happened, so the dongle's firmware was never uploaded and it never became usable.
+
+This patch fixes step 2 by adding a correct entry with `BTUSB_CSR` flags, and also fixes two other places in the code that need to know about this specific device ID.
 
 ---
 
-## How It Works (Short Version)
+## Credits
 
-1. USB subsystem detects `10d7:b012`
-2. Kernel matches against btusb's device table
-3. **Without patch**: driver_info = `BTUSB_ACTIONS_SEMI` → wrong init path → firmware never uploaded → HCI times out
-4. **With patch**: driver_info = `BTUSB_CSR` → `btusb_setup_csr()` called → firmware uploaded → broken commands detected → suspend/resume workaround → dongle works
-
-### Affected USB IDs
-
-| VID:PID | Product | Notes |
-|---------|---------|-------|
-| `10d7:b012` | CSR8510 A10 | Most common clone — targeted by this fix |
-| `0a12:0001` | Cambridge Silicon Radio | Original CSR — already supported by kernel |
-
----
+- Original patch approach by [14-debug](https://github.com/14-debug/patch-btusb-csr8510-10d7-b012)
+- Kernel btusb CSR detection logic by the Linux Bluetooth subsystem maintainers
+- This package and documentation by OWL/nosferatu
 
 ## License
 
